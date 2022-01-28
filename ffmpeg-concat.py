@@ -4,87 +4,119 @@ import json
 import os
 import pathlib
 import subprocess
+import tqdm
 
-# check if ffmpeg is callable.
+# define functions.
 
-try:
-    subprocess.call(['ffmpeg', '-version'], stdout=open(os.devnull, 'wb'))
-except:
-    raise Exception('FFmpeg does not appear to be installed or on path.')
+def check_ffmpeg():
 
-# pull input/output directories from config file.
+    ''' Determine if FFmpeg is available. '''
 
-config_path = pathlib.Path.cwd() / 'config.json'
-if not config_path.exists():
-    raise Exception('Config file could not be found.')
+    try:
+        subprocess.call(['ffmpeg', '-version'], stdout=open(os.devnull, 'wb'))
+    except:
+        raise Exception('FFmpeg does not appear to be installed or on path.')
 
-with open(config_path) as config:
-    config = json.load(config)
-    input_dir = config['input_directory']
-    output_dir = config['output_directory']
+def location_config(config_path):
 
-# create playbook of files to generate.
+    ''' Define and verify input and output locations. '''
 
-planner = dict()
-accepted_extensions = ['.mp4', '.avi', '.mov']
-directories = [x for x in pathlib.Path(input_dir).iterdir() if x.is_dir() == True]
-for d in directories:
-    video_files = [str(x) for x in d.iterdir() if x.suffix in accepted_extensions]
-    planner[str(d.stem)] = video_files
+    if not config_path.exists():
+        raise Exception('Config file could not be found.')
+
+    with open(config_path) as config:
+        config = json.load(config)
+
+    input_dir = pathlib.Path(config['input_directory'])
+    output_dir = pathlib.Path(config['output_directory'])
+
+    for directory in [input_dir, output_dir]:
+        if not directory.exists():
+            raise Exception(directory, 'does not exist.')
+
+    return input_dir, output_dir
+
+def prepare_temp(txt, temp):
+
+    ''' Create temp directory and/or remove existing files. '''
+
+    temp.mkdir(exist_ok=True)
+    for d in [txt]+[pathlib.Path(temp) / f'{str(x).zfill(4)}.mp4' for x in range(0,99)]:
+        if d.exists():
+            os.remove(d)
+
+def define_agenda(source):
+
+    ''' Assemble agenda for transcoding. '''
+
+    p = dict()
+    accepted_extensions = ['.mp4', '.avi', '.mov']
+    directories = [x for x in pathlib.Path(source).iterdir() if x.is_dir() == True]
+    for d in directories:
+        v = [str(x) for x in d.iterdir() if x.suffix in accepted_extensions]
+        p[str(d.stem)] = v
+
+    return p
+
+def normalise_files(txt, temp, agenda):
+ 
+    ''' Normalise source files prior to concatenation. '''
+
+    text_string = list()
+
+    for n, x in enumerate(agenda):
+        in_file, out_file = x, temp / f'{str(n).zfill(4)}.mp4'
+        ffmpeg_call = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-i', str(in_file), str(out_file)]
+        subprocess.call(ffmpeg_call, stdout=open(os.devnull, 'wb'))
+        formatted_path = str(out_file).replace('\\', '/').replace(' ', '\ ')
+        text_string.append(f'file {formatted_path}')
+
+    with open(txt, 'w') as menu:
+        menu.write('\n'.join(text_string))
+
+def concat_files(txt, output):
+
+    ''' Concatenate files based on agenda. '''
     
-# if temp location does not exist, create.
+    with open(txt) as validate:
+        validate = validate.read()
 
-temp_path = pathlib.Path.home() / 'ffmpeg-concat-temp'
-if not temp_path.exists():
-    temp_path.mkdir()
+    if len(validate):
+        ffmpeg_call = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', str(txt), 
+                        '-c:v', 'libx264', '-crf', '23', '-pix_fmt', 'yuv420p', '-preset', 'slow', '-filter:v', 
+                        'yadif=0:-1:0,scale', '-aspect', '4:3', str(output)]
+        subprocess.call(ffmpeg_call, stdout=open(os.devnull, 'wb'))
 
-# process batches sequentially.
+def process_files(txt, temp, agenda):
 
-'''
-to be added: try except to allow for issues to crash script.
-also logs need to be added
-'''
+    ''' Process agenda, render temp files and then concat. '''
 
-for a in planner:
-    expected_output = pathlib.Path(output_dir) / f'{a}.mp4'
-    if not expected_output.exists():
+    t = tqdm.tqdm(total=len(agenda))
+    
+    for a in agenda:
+        expected_output = pathlib.Path(out_dir) / f'{a}.mp4'
+        if not expected_output.exists():
+            prepare_temp(txt, temp)
+            normalise_files(txt, temp, agenda[a])
+            concat_files(txt, expected_output)
 
-        '''
-        clean up any temp files.
-        actually clean up can be very targetted, 
-        as it can just reference name construction eg ffmpeg-concat-001.mp4
-        '''
+        t.update(1)
 
-        text_string = list()
+    t.close()
 
-        for n, x in enumerate(planner[a]):
-            in_file = x
-            out_file = temp_path / f'{str(n).zfill(4)}.mp4'
-            print(in_file, out_file)
+if __name__ == "__main__":
 
-            '''
-            after cleanup function added, delete the -y flag    
-            '''
+    # check FFmpeg is available.
+    check_ffmpeg()
 
-            subprocess.call(['ffmpeg', '-y', '-i', str(in_file), str(out_file)], stdout=open(os.devnull, 'wb'))
+    # define input, output paths.
+    in_dir, out_dir = location_config(pathlib.Path.cwd() / 'config.json')
 
-            '''
-            the filepath modification below should be os dependant.
-            '''
+    # generate agenda of files to process. 
+    agenda = define_agenda(in_dir)
 
-            clean_out_file = str(out_file).replace('\\', '/').replace(' ', '\ ')
-            text_string.append(f'file {clean_out_file}')
+    # process agenda.
+    temp_path = pathlib.Path.home() / 'ffmpeg-concat-temp'
+    process_files(temp_path / 'concat.txt', temp_path, agenda)
 
-        with open(temp_path / 'concat.txt', 'w') as menu:
-            menu.write('\n'.join(text_string))
-
-        '''
-        this is the actual ffmpeg call:
-        ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', str(textpath_form), 
-        '-vcodec', 'libx264', '-crf', '23', '-pix_fmt', 'yuv420p', 
-        '-preset', 'slow', '-filter:v', 'yadif=0:-1:0,scale', 
-        '-aspect', '4:3', '-an', str(videoout)]
-        '''
-
-        ffmpeg_call = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', str(temp_path / 'concat.txt'), str(expected_output)]
-        subprocess.call(ffmpeg_call)
+    print('all done.')

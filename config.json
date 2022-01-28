@@ -1,4 +1,4 @@
 {
-    "input_directory": "path to some location",
-    "output_directory": "path to some other location"
+    "input_directory": "D:\\files_in",
+    "output_directory": "D:\\files_out"
 }
